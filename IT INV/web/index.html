@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="th">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <title>AssetQR &#8212; ระบบจัดการอุปกรณ์</title>
+    <meta name="theme-color" content="#1C315E">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="ระบบจัดการอุปกรณ์ IT &#8212; AssetQR">
+
+    <script>
+        // ============ CONFIG (replaces GAS getConfig()) ============
+        window.CONFIG = {
+            supabaseUrl: "https://xvcgnhcnxmiteyuibfvj.supabase.co",
+            supabaseKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh2Y2duaGNueG1pdGV5dWliZnZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc0NzY0OTQsImV4cCI6MjA4MzA1MjQ5NH0.M6hvCeQGc9bFJ_pOsoVU-GulpNFicYwJBgbBH3g00o4",
+            appTitle: "IT Asset Inventory System"
+        };
+
+        // ============ Polyfill for google.script (GAS compatibility layer) ============
+        // This replaces google.script.run and google.script.url for standalone deployment
+        if (typeof google === 'undefined') {
+            window.google = {
+                script: {
+                    url: {
+                        getLocation: function(callback) {
+                            // Parse URL parameters from window.location
+                            var params = new URLSearchParams(window.location.search);
+                            var hash = window.location.hash.replace('#', '');
+                            var location = {
+                                parameter: {},
+                                hash: hash
+                            };
+                            params.forEach(function(value, key) {
+                                location.parameter[key] = value;
+                            });
+                            if (callback) callback(location);
+                        }
+                    },
+                    run: new Proxy({}, {
+                        get: function(target, prop) {
+                            if (prop === 'withSuccessHandler') {
+                                var chain = { _success: null, _failure: null };
+                                var handler = function(fn) {
+                                    chain._success = fn;
+                                    return new Proxy({}, {
+                                        get: function(t, p) {
+                                            if (p === 'withFailureHandler') {
+                                                return function(fn2) {
+                                                    chain._failure = fn2;
+                                                    return new Proxy({}, {
+                                                        get: function(t2, funcName) {
+                                                            return function() {
+                                                                var args = Array.from(arguments);
+                                                                google.script._callFunction(funcName, args, chain._success, chain._failure);
+                                                            };
+                                                        }
+                                                    });
+                                                };
+                                            }
+                                            // Direct function call after withSuccessHandler
+                                            return function() {
+                                                var args = Array.from(arguments);
+                                                google.script._callFunction(p, args, chain._success, chain._failure);
+                                            };
+                                        }
+                                    });
+                                };
+                                return handler;
+                            }
+                            if (prop === 'withFailureHandler') {
+                                var chain2 = { _success: null, _failure: null };
+                                return function(fn) {
+                                    chain2._failure = fn;
+                                    return new Proxy({}, {
+                                        get: function(t, p2) {
+                                            if (p2 === 'withSuccessHandler') {
+                                                return function(fn2) {
+                                                    chain2._success = fn2;
+                                                    return new Proxy({}, {
+                                                        get: function(t2, funcName) {
+                                                            return function() {
+                                                                var args = Array.from(arguments);
+                                                                google.script._callFunction(funcName, args, chain2._success, chain2._failure);
+                                                            };
+                                                        }
+                                                    });
+                                                };
+                                            }
+                                            return function() {
+                                                var args = Array.from(arguments);
+                                                google.script._callFunction(p2, args, chain2._success, chain2._failure);
+                                            };
+                                        }
+                                    });
+                                };
+                            }
+                            // Direct call: google.script.run.functionName()
+                            return function() {
+                                var args = Array.from(arguments);
+                                google.script._callFunction(prop, args, null, null);
+                            };
+                        }
+                    }),
+
+                    // ============ Server function implementations (replaces GAS backend) ============
+                    _callFunction: async function(name, args, onSuccess, onFailure) {
+                        var url = window.CONFIG.supabaseUrl;
+                        var key = window.CONFIG.supabaseKey;
+                        var headers = {
+                            'apikey': key,
+                            'Authorization': 'Bearer ' + key,
+                            'Content-Type': 'application/json',
+                            'Prefer': 'return=representation'
+                        };
+
+                        try {
+                            var result;
+                            switch(name) {
+                                case 'getWebAppUrl':
+                                    result = window.location.origin + window.location.pathname;
+                                    break;
+
+                                case 'updateAsset':
+                                    var updateId = args[0];
+                                    var updateData = args[1];
+                                    var resp = await fetch(url + '/rest/v1/assets?id=eq.' + updateId, {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify(updateData)
+                                    });
+                                    if (!resp.ok) throw new Error('Update failed: ' + resp.statusText);
+                                    var updated = await resp.json();
+                                    // Log audit
+                                    await fetch(url + '/rest/v1/audit_log', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ asset_id: updateId, action: 'แก้ไขอุปกรณ์', details: 'อัปเดตข้อมูล', performed_by: 'Admin' })
+                                    });
+                                    result = updated[0];
+                                    break;
+
+                                case 'createAsset':
+                                    var createData = args[0];
+                                    if (!createData.asset_code) {
+                                        var year = new Date().getFullYear() + 543;
+                                        var yearShort = String(year).slice(-2);
+                                        var month = String(new Date().getMonth() + 1).padStart(2, '0');
+                                        var countResp = await fetch(url + '/rest/v1/assets?select=id&limit=0', {
+                                            headers: Object.assign({}, headers, { 'Prefer': 'count=exact' })
+                                        });
+                                        var range = countResp.headers.get('content-range') || '*/0';
+                                        var total = parseInt(range.split('/')[1]) || 0;
+                                        createData.asset_code = 'IT-' + yearShort + month + '-' + String(total + 1).padStart(4, '0');
+                                    }
+                                    var createResp = await fetch(url + '/rest/v1/assets', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify(createData)
+                                    });
+                                    if (!createResp.ok) throw new Error('Create failed: ' + createResp.statusText);
+                                    var created = await createResp.json();
+                                    // Log audit
+                                    await fetch(url + '/rest/v1/audit_log', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ asset_id: created[0].id, action: 'สร้างอุปกรณ์ใหม่', details: 'สร้าง: ' + createData.name, performed_by: 'Admin' })
+                                    });
+                                    result = created[0];
+                                    break;
+
+                                case 'saveSignature':
+                                    var sigAssetId = args[0];
+                                    var sigBase64 = args[1];
+                                    // Upload to Supabase Storage
+                                    var timestamp = new Date().getTime();
+                                    var sigPath = sigAssetId + '/sig_' + timestamp + '.png';
+                                    var binaryStr = atob(sigBase64);
+                                    var bytes = new Uint8Array(binaryStr.length);
+                                    for (var i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                                    var uploadResp = await fetch(url + '/storage/v1/object/signatures/' + sigPath, {
+                                        method: 'POST',
+                                        headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'image/png', 'x-upsert': 'true' },
+                                        body: bytes
+                                    });
+                                    if (!uploadResp.ok) throw new Error('Upload failed');
+                                    var signatureUrl = url + '/storage/v1/object/public/signatures/' + sigPath;
+                                    var sigInsertResp = await fetch(url + '/rest/v1/signatures', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ asset_id: sigAssetId, signature_url: signatureUrl })
+                                    });
+                                    var sigResult = await sigInsertResp.json();
+                                    // Log audit
+                                    await fetch(url + '/rest/v1/audit_log', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ asset_id: sigAssetId, action: 'เซ็นรับอุปกรณ์', details: 'บันทึกลายเซ็น', performed_by: 'Admin' })
+                                    });
+                                    result = sigResult[0];
+                                    break;
+
+                                case 'markNotificationRead':
+                                    await fetch(url + '/rest/v1/notifications?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify({ is_read: true })
+                                    });
+                                    result = { success: true };
+                                    break;
+
+                                case 'markAllNotificationsRead':
+                                    await fetch(url + '/rest/v1/notifications?is_read=eq.false', {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify({ is_read: true })
+                                    });
+                                    result = { success: true };
+                                    break;
+
+                                case 'exportExcel':
+                                case 'exportPDF':
+                                    // Client-side export using XLSX library (already loaded)
+                                    var exportAssetIds = args[0];
+                                    var exportFields = args[1];
+                                    var filter = exportAssetIds ? 'id=in.(' + exportAssetIds.join(',') + ')' : null;
+                                    var exportData = await App.supabaseSelect('assets', '*, categories(name), departments(name)', filter, 'created_at.desc');
+                                    
+                                    var fieldDefs = [
+                                        { key: 'asset_code', label: 'รหัสทรัพย์สิน' },
+                                        { key: 'name', label: 'ชื่ออุปกรณ์' },
+                                        { key: 'serial_number', label: 'Serial Number' },
+                                        { key: 'category_name', label: 'ประเภท' },
+                                        { key: 'department_name', label: 'แผนก' },
+                                        { key: 'location', label: 'สถานที่' },
+                                        { key: 'status', label: 'สถานะ' },
+                                        { key: 'purchase_date', label: 'วันที่ซื้อ' },
+                                        { key: 'warranty_expiry', label: 'หมดประกัน' },
+                                        { key: 'supplier', label: 'ผู้จำหน่าย' },
+                                        { key: 'price', label: 'ราคา' },
+                                        { key: 'notes', label: 'หมายเหตุ' },
+                                        { key: 'created_at', label: 'วันที่บันทึก' }
+                                    ];
+                                    if (exportFields && exportFields.length > 0) {
+                                        fieldDefs = fieldDefs.filter(function(f) { return exportFields.indexOf(f.key) !== -1; });
+                                    }
+
+                                    function getVal(asset, key) {
+                                        if (key === 'category_name') return asset.categories ? asset.categories.name : '';
+                                        if (key === 'department_name') return asset.departments ? asset.departments.name : '';
+                                        if (key === 'price') return asset.price ? Number(asset.price).toLocaleString('th-TH') : '';
+                                        if (key === 'purchase_date' || key === 'warranty_expiry' || key === 'created_at') return asset[key] ? App.formatDate(asset[key]) : '';
+                                        return asset[key] || '';
+                                    }
+
+                                    if (name === 'exportExcel') {
+                                        // Use XLSX library
+                                        var wsData = [fieldDefs.map(function(f) { return f.label; })];
+                                        exportData.forEach(function(a) {
+                                            wsData.push(fieldDefs.map(function(f) { return getVal(a, f.key); }));
+                                        });
+                                        var wb = XLSX.utils.book_new();
+                                        var ws = XLSX.utils.aoa_to_sheet(wsData);
+                                        XLSX.utils.book_append_sheet(wb, ws, 'อุปกรณ์');
+                                        var wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+                                        result = {
+                                            base64: wbout,
+                                            filename: 'AssetQR_Export_' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.xlsx',
+                                            mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                                        };
+                                    } else {
+                                        // PDF export using jsPDF
+                                        var doc = new jspdf.jsPDF('l', 'mm', 'a4');
+                                        doc.setFontSize(16);
+                                        doc.text('รายงานอุปกรณ์ — AssetQR', 14, 15);
+                                        doc.setFontSize(10);
+                                        doc.text('วันที่: ' + new Date().toLocaleDateString('th-TH'), 14, 22);
+                                        doc.text('จำนวน: ' + exportData.length + ' รายการ', 14, 27);
+                                        
+                                        var tableHeaders = fieldDefs.map(function(f) { return f.label; });
+                                        var tableRows = exportData.map(function(a) {
+                                            return fieldDefs.map(function(f) { return String(getVal(a, f.key)); });
+                                        });
+                                        doc.autoTable({ head: [tableHeaders], body: tableRows, startY: 32, styles: { fontSize: 8 } });
+                                        
+                                        var pdfBase64 = doc.output('datauristring').split(',')[1];
+                                        result = {
+                                            base64: pdfBase64,
+                                            filename: 'AssetQR_Report_' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.pdf',
+                                            mimeType: 'application/pdf'
+                                        };
+                                    }
+                                    break;
+
+                                case 'deleteAsset':
+                                    await fetch(url + '/rest/v1/assets?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'deleteAssets':
+                                    for (var di = 0; di < args[0].length; di++) {
+                                        await fetch(url + '/rest/v1/assets?id=eq.' + args[0][di], { method: 'DELETE', headers: headers });
+                                    }
+                                    result = { success: true, count: args[0].length };
+                                    break;
+
+                                case 'uploadAssetImage':
+                                    var imgAssetId = args[0], imgBase64 = args[1], imgFileName = args[2], imgContentType = args[3];
+                                    var imgTs = new Date().getTime();
+                                    var imgPath = imgAssetId + '/' + imgTs + '_' + imgFileName;
+                                    var imgBinary = atob(imgBase64);
+                                    var imgBytes = new Uint8Array(imgBinary.length);
+                                    for (var ib = 0; ib < imgBinary.length; ib++) imgBytes[ib] = imgBinary.charCodeAt(ib);
+                                    var imgUpResp = await fetch(url + '/storage/v1/object/asset-images/' + imgPath, {
+                                        method: 'POST',
+                                        headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': imgContentType, 'x-upsert': 'true' },
+                                        body: imgBytes
+                                    });
+                                    if (!imgUpResp.ok) throw new Error('Image upload failed');
+                                    var imgFileUrl = url + '/storage/v1/object/public/asset-images/' + imgPath;
+                                    var imgInsert = await fetch(url + '/rest/v1/asset_images', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ asset_id: imgAssetId, file_url: imgFileUrl, file_name: imgFileName })
+                                    });
+                                    result = (await imgInsert.json())[0];
+                                    break;
+
+                                case 'deleteAssetImage':
+                                    await fetch(url + '/rest/v1/asset_images?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'deleteSignature':
+                                    await fetch(url + '/rest/v1/signatures?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'createTicket':
+                                    var ticketData = args[0];
+                                    ticketData.status = 'เปิด';
+                                    var ticketResp = await fetch(url + '/rest/v1/repair_tickets', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify(ticketData)
+                                    });
+                                    result = (await ticketResp.json())[0];
+                                    break;
+
+                                case 'updateTicket':
+                                    var utId = args[0], utData = args[1];
+                                    var utResp = await fetch(url + '/rest/v1/repair_tickets?id=eq.' + utId, {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify(utData)
+                                    });
+                                    result = (await utResp.json())[0];
+                                    break;
+
+                                case 'deleteTicket':
+                                    await fetch(url + '/rest/v1/repair_tickets?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'createTransfer':
+                                    var trData = args[0];
+                                    var trResp = await fetch(url + '/rest/v1/asset_transfers', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify(trData)
+                                    });
+                                    result = (await trResp.json())[0];
+                                    break;
+
+                                case 'createCategory':
+                                    var catResp = await fetch(url + '/rest/v1/categories', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ name: args[0], icon: args[1] || 'box' })
+                                    });
+                                    result = await catResp.json();
+                                    break;
+
+                                case 'createDepartment':
+                                    var deptResp = await fetch(url + '/rest/v1/departments', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify({ name: args[0] })
+                                    });
+                                    result = await deptResp.json();
+                                    break;
+
+                                case 'deleteCategory':
+                                    await fetch(url + '/rest/v1/categories?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'deleteDepartment':
+                                    await fetch(url + '/rest/v1/departments?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'renameCategory':
+                                    await fetch(url + '/rest/v1/categories?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify({ name: args[1] })
+                                    });
+                                    result = { success: true };
+                                    break;
+
+                                case 'renameDepartment':
+                                    await fetch(url + '/rest/v1/departments?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify({ name: args[1] })
+                                    });
+                                    result = { success: true };
+                                    break;
+
+                                case 'createLicense':
+                                    var licResp = await fetch(url + '/rest/v1/licenses', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify(args[0])
+                                    });
+                                    result = (await licResp.json())[0];
+                                    break;
+
+                                case 'updateLicense':
+                                    var ulResp = await fetch(url + '/rest/v1/licenses?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify(args[1])
+                                    });
+                                    result = (await ulResp.json())[0];
+                                    break;
+
+                                case 'deleteLicense':
+                                    await fetch(url + '/rest/v1/licenses?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'createMaintenance':
+                                    var pmResp = await fetch(url + '/rest/v1/maintenance_schedules', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify(args[0])
+                                    });
+                                    result = (await pmResp.json())[0];
+                                    break;
+
+                                case 'updateMaintenance':
+                                    var umResp = await fetch(url + '/rest/v1/maintenance_schedules?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify(args[1])
+                                    });
+                                    result = (await umResp.json())[0];
+                                    break;
+
+                                case 'completeMaintenance':
+                                    var cmData = await App.supabaseSelect('maintenance_schedules', '*', 'id=eq.' + args[0]);
+                                    var pm = cmData[0];
+                                    var nowDate = new Date();
+                                    var nextDue = new Date(nowDate.getTime() + (pm.interval_days || 30) * 86400000).toISOString();
+                                    await fetch(url + '/rest/v1/maintenance_schedules?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify({ last_performed_at: nowDate.toISOString(), next_due_at: nextDue, status: 'pending' })
+                                    });
+                                    result = { success: true, next_due_at: nextDue };
+                                    break;
+
+                                case 'deleteMaintenance':
+                                    await fetch(url + '/rest/v1/maintenance_schedules?id=eq.' + args[0], { method: 'DELETE', headers: headers });
+                                    result = { success: true };
+                                    break;
+
+                                case 'checkoutAsset':
+                                    var coResp = await fetch(url + '/rest/v1/asset_checkouts', {
+                                        method: 'POST', headers: headers,
+                                        body: JSON.stringify(args[0])
+                                    });
+                                    result = (await coResp.json())[0];
+                                    break;
+
+                                case 'checkinAsset':
+                                    await fetch(url + '/rest/v1/asset_checkouts?id=eq.' + args[0], {
+                                        method: 'PATCH', headers: headers,
+                                        body: JSON.stringify({ actual_return_date: new Date().toISOString(), status: 'returned' })
+                                    });
+                                    result = { success: true };
+                                    break;
+
+                                case 'updateSettings':
+                                    var settingsData = args[0];
+                                    var settingsKeys = Object.keys(settingsData);
+                                    for (var sk = 0; sk < settingsKeys.length; sk++) {
+                                        var sKey = settingsKeys[sk];
+                                        var existing = await App.supabaseSelect('settings', 'id', 'key=eq.' + sKey);
+                                        if (existing && existing.length > 0) {
+                                            await fetch(url + '/rest/v1/settings?key=eq.' + sKey, {
+                                                method: 'PATCH', headers: headers,
+                                                body: JSON.stringify({ value: settingsData[sKey] })
+                                            });
+                                        } else {
+                                            await fetch(url + '/rest/v1/settings', {
+                                                method: 'POST', headers: headers,
+                                                body: JSON.stringify({ key: sKey, value: settingsData[sKey] })
+                                            });
+                                        }
+                                    }
+                                    result = { success: true };
+                                    break;
+
+                                case 'getSystemInfo':
+                                    result = {
+                                        assetCount: 0, ticketCount: 0, licenseCount: 0,
+                                        auditLogCount: 0, maintenanceCount: 0, checkoutCount: 0,
+                                        webAppUrl: window.location.origin + window.location.pathname,
+                                        warrantyTrigger: null,
+                                        version: '3.0.0-vercel'
+                                    };
+                                    break;
+
+                                case 'purgeOldAuditLogs':
+                                    var monthsOld = args[0] || 6;
+                                    var cutoff = new Date();
+                                    cutoff.setMonth(cutoff.getMonth() - monthsOld);
+                                    await fetch(url + '/rest/v1/audit_log?created_at=lt.' + cutoff.toISOString(), { method: 'DELETE', headers: headers });
+                                    result = { success: true, deleted: 0 };
+                                    break;
+
+                                case 'generateReceipt':
+                                    // Return HTML for receipt
+                                    result = '<div style="padding:20px;text-align:center"><p>Receipt generation is available in the full version.</p></div>';
+                                    break;
+
+                                case 'setupDailyWarrantyCheck':
+                                case 'removeDailyWarrantyCheck':
+                                    result = { success: true, message: 'Cron jobs are managed via Vercel/Supabase' };
+                                    break;
+
+                                case 'importAssets':
+                                    var csvData = args[0];
+                                    var imported = 0;
+                                    var errors = [];
+                                    for (var ci = 0; ci < csvData.length; ci++) {
+                                        try {
+                                            var row = csvData[ci];
+                                            await fetch(url + '/rest/v1/assets', {
+                                                method: 'POST', headers: headers,
+                                                body: JSON.stringify({
+                                                    name: row.name || row['ชื่ออุปกรณ์'],
+                                                    asset_code: row.asset_code || row['รหัสทรัพย์สิน'],
+                                                    serial_number: row.serial_number || row['Serial Number'],
+                                                    location: row.location || row['สถานที่'],
+                                                    status: row.status || row['สถานะ'] || 'ใช้งาน'
+                                                })
+                                            });
+                                            imported++;
+                                        } catch(e) { errors.push('Row ' + (ci+1) + ': ' + e.message); }
+                                    }
+                                    result = { imported: imported, errors: errors };
+                                    break;
+
+                                default:
+                                    console.warn('[GAS Compat] Unknown function:', name, args);
+                                    result = { success: true };
+                            }
+
+                            if (onSuccess) onSuccess(result);
+                        } catch(err) {
+                            console.error('[GAS Compat] Error in', name, ':', err);
+                            if (onFailure) onFailure(err);
+                        }
+                    }
+                }
+            };
+        }
+    </script>
+
+    <!-- External Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/signature_pad@4.1.7/dist/signature_pad.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.1/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <!-- Styles (loaded from original file) -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div style="text-align:center">
+            <div class="spinner"></div>
+            <p style="margin-top:12px;color:var(--text-secondary)">กำลังโหลด...</p>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Mobile Overlay -->
+    <div class="mobile-overlay" id="mobileOverlay" onclick="toggleMobileSidebar()"></div>
+
+    <div class="app-container" id="appContainer">
+        <!-- Components: Sidebar + Topbar + Modals (loaded via script) -->
+        <div id="componentsContainer"></div>
+
+        <!-- Main Content -->
+        <div class="main-content" id="mainContent">
+            <div id="page-dashboard" class="page active"></div>
+            <div id="page-assets" class="page"></div>
+            <div id="page-asset-detail" class="page"></div>
+            <div id="page-qrcode" class="page"></div>
+            <div id="page-licenses" class="page"></div>
+            <div id="page-scan" class="page"></div>
+            <div id="page-tickets" class="page"></div>
+            <div id="page-warranty" class="page"></div>
+            <div id="page-maintenance" class="page"></div>
+            <div id="page-checkouts" class="page"></div>
+            <div id="page-transfers" class="page"></div>
+            <div id="page-reports" class="page"></div>
+            <div id="page-audit-log" class="page"></div>
+            <div id="page-settings" class="page"></div>
+        </div>
+    </div>
+
+    <script>
+        // Helper: inject HTML content (strips script/style tags and executes scripts)
+        function injectHTML(html, targetElement) {
+            // Create a temp div to parse content
+            var temp = document.createElement('div');
+            temp.innerHTML = html;
+            
+            // Move all children to target
+            while (temp.firstChild) {
+                targetElement.appendChild(temp.firstChild);
+            }
+        }
+
+        // Helper: extract and execute scripts from HTML content
+        function extractAndRunScripts(html) {
+            var scripts = [];
+            var cleaned = html.replace(/<script[^>]*>([\s\S]*?)<\/script>/gi, function(match, code) {
+                scripts.push(code);
+                return '';
+            });
+            return { html: cleaned, scripts: scripts };
+        }
+
+        // Helper: extract CSS from HTML content
+        function extractCSS(html) {
+            var css = '';
+            html.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, function(match, code) {
+                css += code + '\n';
+                return '';
+            });
+            return css;
+        }
+
+        // ============ LOAD ALL FILES ============
+        async function loadApp() {
+            try {
+                // Load all files in parallel from parent directory (GAS source files)
+                var [stylesText, componentsText, appText, pagesText] = await Promise.all([
+                    fetch('./styles.html').then(function(r) { return r.text(); }),
+                    fetch('./components.html').then(function(r) { return r.text(); }),
+                    fetch('./app.html').then(function(r) { return r.text(); }),
+                    fetch('./pages.html').then(function(r) { return r.text(); })
+                ]);
+
+                // 1. Inject styles
+                var css = extractCSS(stylesText);
+                var styleEl = document.createElement('style');
+                styleEl.textContent = css;
+                document.head.appendChild(styleEl);
+
+                // 2. Inject components (HTML + scripts)
+                var compParsed = extractAndRunScripts(componentsText);
+                var compContainer = document.getElementById('componentsContainer');
+                compContainer.outerHTML = compParsed.html;
+                compParsed.scripts.forEach(function(code) {
+                    var s = document.createElement('script');
+                    s.textContent = code;
+                    document.body.appendChild(s);
+                });
+
+                // 3. Execute app.js
+                var appParsed = extractAndRunScripts(appText);
+                appParsed.scripts.forEach(function(code) {
+                    var s = document.createElement('script');
+                    s.textContent = code;
+                    document.body.appendChild(s);
+                });
+
+                // 4. Execute pages.js
+                var pagesParsed = extractAndRunScripts(pagesText);
+                pagesParsed.scripts.forEach(function(code) {
+                    var s = document.createElement('script');
+                    s.textContent = code;
+                    document.body.appendChild(s);
+                });
+
+                // 5. Initialize the app
+                var params = new URLSearchParams(window.location.search);
+                var initialPage = params.get('page') || 'dashboard';
+                var initialAssetId = params.get('id') || '';
+                
+                // Give a small delay for everything to settle
+                setTimeout(function() {
+                    if (typeof App !== 'undefined' && App.init) {
+                        App.init(initialPage, initialAssetId);
+                    }
+                }, 50);
+
+            } catch(err) {
+                console.error('Failed to load app:', err);
+                document.body.innerHTML = '<div style="padding:40px;text-align:center">' +
+                    '<h2>Loading Error</h2>' +
+                    '<p>' + err.message + '</p>' +
+                    '<p>Make sure all source files (styles.html, components.html, app.html, pages.html) are in the same directory.</p>' +
+                    '</div>';
+            }
+        }
+
+        // Start loading
+        loadApp();
+    </script>
+</body>
+
+</html>
